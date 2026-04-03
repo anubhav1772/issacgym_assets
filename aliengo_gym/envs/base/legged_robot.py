@@ -1718,8 +1718,11 @@ class LeggedRobot(BaseTask):
                     continue
 
             # convert to world
-            x = origin_x + (xi - H//2) * scale
-            y = origin_y + (yi - W//2) * scale
+            # x = origin_x + (xi - H//2) * scale
+            # y = origin_y + (yi - W//2) * scale
+
+            x = xi * scale
+            y = yi * scale
 
             # spacing constraint
             if any(np.linalg.norm([x - px, y - py]) < min_dist for px, py in existing_positions):
@@ -2003,7 +2006,7 @@ class LeggedRobot(BaseTask):
             gz = env_origin[2].item()
 
             pose = gymapi.Transform()
-            pose.p = gymapi.Vec3(gx, gy, gz - 1.3)
+            pose.p = gymapi.Vec3(gx, gy, gz + 0.8)
             # pose.p = gymapi.Vec3(gx, gy, origin_z + 0.02)
             # pose.r = self.upright_quat_facing_robot(gx, gy, origin_x, origin_y)
             pose.r = gymapi.Quat.from_euler_zyx(1.57, 0, 1.57 + 0.785)
@@ -2087,7 +2090,7 @@ class LeggedRobot(BaseTask):
             mz = env_origin[2].item()
 
             pose = gymapi.Transform()
-            pose.p = gymapi.Vec3(mx, my, mz - 2.0)
+            pose.p = gymapi.Vec3(mx, my, mz - 2.5)
             # pose.r = self.face_robot_quat(mx, my, origin_x, origin_y)
             # pose.p = gymapi.Vec3(mx, my, origin_z + 0.02)
             # pose.r = self.face_robot_quat(mx, my, origin_x, origin_y)
