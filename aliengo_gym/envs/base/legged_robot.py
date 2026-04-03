@@ -19,6 +19,11 @@ from .legged_robot_config import BaseCfg
 #from aliengo_gym.utils.terrain_new import Terrain
 # from .ll_config import BaseCfg
 
+# import rclpy
+# from isaac_bridge.camera_node import CameraPublisher
+
+import zmq
+import pickle
 
 class LeggedRobot(BaseTask):
     def __init__(self, cfg: BaseCfg, sim_params, physics_engine, sim_device, headless, eval_cfg=None,
@@ -47,6 +52,7 @@ class LeggedRobot(BaseTask):
 
         self.robot_indices = []
         self.guitar_indices = []
+        self.camera_handles = []
 
         super().__init__(self.cfg, sim_params, physics_engine, sim_device, headless, self.eval_cfg)
 
@@ -68,6 +74,13 @@ class LeggedRobot(BaseTask):
         self.vel_x_limit = self.cfg.commands.lin_vel_x
         #self.defer_reset = False
         #self.defer_command_resample = False
+
+        # rclpy.init()
+        # self.camera_node = CameraPublisher()
+
+        self.zmq_context = zmq.Context()
+        self.zmq_socket = self.zmq_context.socket(zmq.PUB)
+        self.zmq_socket.bind("tcp://*:5555")
 
     def step(self, actions):
         """ Apply actions, simulate, call self.post_physics_step()
@@ -133,9 +146,10 @@ class LeggedRobot(BaseTask):
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_net_contact_force_tensor(self.sim)
         self.gym.refresh_rigid_body_state_tensor(self.sim)
-        if self.record_now:
-            self.gym.step_graphics(self.sim)
-            self.gym.render_all_camera_sensors(self.sim)
+        self.gym.step_graphics(self.sim)
+        # if self.record_now:
+            # self.gym.step_graphics(self.sim)
+            # self.gym.render_all_camera_sensors(self.sim)
 
         self.episode_length_buf += 1
         self.common_step_counter += 1
@@ -167,6 +181,45 @@ class LeggedRobot(BaseTask):
                                                           )[:, self.feet_indices, 7:10]
         self.foot_positions = self.rigid_body_state.view(self.num_envs, self.num_bodies, 13)[:, self.feet_indices,
                               0:3]
+
+        # ===============================
+        # CAMERA + ROS PUBLISH HERE
+        # ===============================
+        # if self.common_step_counter % 10 == 0:
+        if True:
+
+            # ALWAYS update graphics first
+            self.gym.step_graphics(self.sim)
+
+            # render cameras
+            self.gym.render_all_camera_sensors(self.sim)
+
+            env = self.envs[0]
+            cam = self.camera_handles[0]
+
+            # CPU image API (SAFE)
+            rgb = self.gym.get_camera_image(
+                self.sim, env, cam, gymapi.IMAGE_COLOR
+            )
+
+            depth = self.gym.get_camera_image(
+                self.sim, env, cam, gymapi.IMAGE_DEPTH
+            )
+
+            # reshape
+            rgb = rgb.reshape((480, 640, 4))[:, :, :3]
+            depth = -depth.reshape((480, 640))
+
+            # send
+            self.zmq_socket.send(pickle.dumps({
+                "rgb": rgb,
+                "depth": depth
+            }))
+
+
+            # self.camera_node.publish(rgb, depth)
+            # rclpy.spin_once(self.camera_node, timeout_sec=0.0)
+        # ========================================
 
         self._post_physics_step_callback()
 
@@ -1237,7 +1290,7 @@ class LeggedRobot(BaseTask):
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_net_contact_force_tensor(self.sim)
         self.gym.refresh_rigid_body_state_tensor(self.sim)
-        self.gym.render_all_camera_sensors(self.sim)
+        # self.gym.render_all_camera_sensors(self.sim)
 
         # create some wrapper tensors for different slices
         self.root_states = gymtorch.wrap_tensor(actor_root_state)
@@ -1648,6 +1701,60 @@ class LeggedRobot(BaseTask):
         y = origin_y + np.random.uniform(-room_size_y/2 + 1.0, room_size_y/2 - 1.0)
         return x, y
 
+    def get_candidate_positions(self, origin_x, origin_y, room_x, room_y, grid_size=3, margin=0.8):
+        xs = np.linspace(origin_x + margin, origin_x + room_x - margin, grid_size)
+        ys = np.linspace(origin_y + margin, origin_y + room_y - margin, grid_size)
+        return [(x, y) for x in xs for y in ys]
+
+
+    def jitter(self, x, y, amount=0.2):
+        return (
+            x + np.random.uniform(-amount, amount),
+            y + np.random.uniform(-amount, amount)
+        )
+
+
+    def is_valid_position(self, x, y, origin_x, origin_y, room_x, room_y, wall_margin=0.5):
+        if x < origin_x + wall_margin: return False
+        if x > origin_x + room_x - wall_margin: return False
+        if y < origin_y + wall_margin: return False
+        if y > origin_y + room_y - wall_margin: return False
+        return True
+
+    def sample_local_positions(self, origin_x, origin_y, size=4.0, grid=3, margin=0.5):
+        xs = np.linspace(origin_x - size/2 + margin, origin_x + size/2 - margin, grid)
+        ys = np.linspace(origin_y - size/2 + margin, origin_y + size/2 - margin, grid)
+        return [(x, y) for x in xs for y in ys]
+
+    def is_valid_via_height(self, x, y, env_id):
+
+        # save original
+        original = self.root_states[env_id, :3].clone()
+
+        # move robot temporarily
+        self.root_states[env_id, 0] = x
+        self.root_states[env_id, 1] = y
+
+        heights = self._get_heights([env_id], self.cfg)
+
+        # restore
+        self.root_states[env_id, :3] = original
+
+        # check if terrain is reasonable
+        if torch.isnan(heights).any():
+            return False
+
+        if torch.abs(heights).mean() > 0.5:
+            return False
+
+        return True
+
+    def is_far_enough(self, x, y, placed, min_dist=1.0):
+        for px, py in placed:
+            if np.linalg.norm([x - px, y - py]) < min_dist:
+                return False
+        return True
+
     def _create_envs(self):
         """ Creates environments:
              1. loads the robot URDF/MJCF asset,
@@ -1808,11 +1915,9 @@ class LeggedRobot(BaseTask):
             asset_options
         )
         assert self.bag_asset is not None, "Bagpack asset NOT loaded"
-        ##################################
-
-        placed_positions = []
 
         for i in range(self.num_envs):
+
             # create env instance
             env_handle = self.gym.create_env(self.sim, env_lower, env_upper, int(np.sqrt(self.num_envs)))
             pos = self.env_origins[i].clone()
@@ -1827,280 +1932,692 @@ class LeggedRobot(BaseTask):
             anymal_handle = self.gym.create_actor(env_handle, self.robot_asset, start_pose, "anymal", i,
                                                   self.cfg.asset.self_collisions, 0)
 
-            ##############################
-            # =========================================================
-            # OBJECT PLACEMENT (GUITAR + FLOWERPOTS)
-            # =========================================================
+            # XXXXXXXXXXXXXXXXXXXXXXXXXX
+            # CAMERA
+            # XXXXXXXXXXXXXXXXXXXXXXXXXX
+            camera_props = gymapi.CameraProperties()
+            camera_props.width = 640
+            camera_props.height = 480
+            camera_props.enable_tensors = False #True
+
+            camera_handle = self.gym.create_camera_sensor(env_handle, camera_props)
+
+            # attach to robot (like base)
+            self.gym.attach_camera_to_body(
+                camera_handle,
+                env_handle,
+                anymal_handle,  # robot actor
+                gymapi.Transform(
+                    gymapi.Vec3(0.3, 0.0, 0.2),  # forward, center, height
+                    gymapi.Quat.from_euler_zyx(0, 0, 0)
+                ),
+                gymapi.FOLLOW_TRANSFORM
+            )
+
+            self.camera_handles.append(camera_handle)
+
+            # XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+            # OBJECT PLACEMENT
+            # XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 
             env_origin = self.env_origins[i]
+
+            # origin_x = float(env_origin[0].cpu())
+            # origin_y = float(env_origin[1].cpu())
+            #
+            # room_size = 4.0
+            #
+            # placed_positions = []
+            #
+            # candidates = self.sample_local_positions(origin_x, origin_y, size=room_size, grid=3)
+            # np.random.shuffle(candidates)
+            #
+            #
+            # def get_next_valid():
+            #     while candidates:
+            #         x, y = candidates.pop()
+            #
+            #         # small jitter
+            #         x += np.random.uniform(-0.2, 0.2)
+            #         y += np.random.uniform(-0.2, 0.2)
+            #
+            #         # LOCAL boundary check (correct)
+            #         if x < origin_x - room_size/2 + 0.3: continue
+            #         if x > origin_x + room_size/2 - 0.3: continue
+            #         if y < origin_y - room_size/2 + 0.3: continue
+            #         if y > origin_y + room_size/2 - 0.3: continue
+            #
+            #         # spacing check
+            #         if all(np.linalg.norm([x - px, y - py]) > 1.0 for px, py in placed_positions):
+            #             placed_positions.append((x, y))
+            #             return x, y
+            #
+            #     raise RuntimeError("No valid placement found")
+
+            # terrain_length = self.cfg.terrain.terrain_length * self.cfg.terrain.num_rows
+            # terrain_width  = self.cfg.terrain.terrain_width  * self.cfg.terrain.num_cols
+            #
+            # print(f"terrain len: {self.cfg.terrain.terrain_length}, terrain_width: {self.cfg.terrain.terrain_width}")
+            # print(f"terrain_rows: {self.cfg.terrain.num_rows}, terrain_cols: {self.cfg.terrain.num_cols}")
+            #
+            # half_x = terrain_length / 2
+            # half_y = terrain_width / 2
+            #
+            # margin = 2.0
+            #
+            # xs = np.linspace(-half_x + margin, half_x - margin, 5)
+            # ys = np.linspace(-half_y + margin, half_y - margin, 5)
+            #
+            # grid = [(x, y) for x in xs for y in ys]
+            #
+            # # shuffle grid
+            # np.random.shuffle(grid)
+            #
+            # # pick positions directly (NO rejection sampling)
+            # positions = grid[:5]
+
+            # Circular Layout
+            # origin_x = float(env_origin[0].cpu())
+            # origin_y = float(env_origin[1].cpu())
+            #
+            # num_objects = 5
+            #
+            # # multi-radius for proper spread (near → far)
+            # radii = [1.5, 2.5, 3.5, 4.2, 4.8]
+            #
+            # safe_radius = 5.0     # max allowed distance from center
+            # min_dist = 1.0        # object-object spacing
+            # max_tries = 25
+            #
+            # final_positions = []
+            #
+            # for k in range(num_objects):
+            #
+            #     placed = False
+            #
+            #     for _ in range(max_tries):
+            #
+            #         # spread angle with randomness
+            #         angle = 2 * np.pi * k / num_objects + np.random.uniform(-0.3, 0.3)
+            #
+            #         r = radii[k]
+            #
+            #         # base position
+            #         x = origin_x + r * np.cos(angle)
+            #         y = origin_y + r * np.sin(angle)
+            #
+            #         # jitter to escape obstacles
+            #         x += np.random.uniform(-0.4, 0.4)
+            #         y += np.random.uniform(-0.4, 0.4)
+            #
+            #         # boundary constraint (critical)
+            #         if np.linalg.norm([x - origin_x, y - origin_y]) > safe_radius:
+            #             continue
+            #
+            #         # spacing constraint
+            #         if any(np.linalg.norm([x - px, y - py]) < min_dist for px, py in final_positions):
+            #             continue
+            #
+            #         # lightweight terrain sanity
+            #         # (safe to keep or remove depending on stability)
+            #         if hasattr(self, "is_valid_terrain"):
+            #             try:
+            #                 if not self.is_valid_terrain(x, y):
+            #                     continue
+            #             except:
+            #                 pass
+            #
+            #         final_positions.append((x, y))
+            #         placed = True
+            #         break
+            #
+            #     if not placed:
+            #         print("⚠️ fallback placement used")
+            #         # fallback without jitter (still valid due to radius design)
+            #         angle = 2 * np.pi * k / num_objects
+            #         r = radii[k]
+            #         x = origin_x + r * np.cos(angle)
+            #         y = origin_y + r * np.sin(angle)
+            #         final_positions.append((x, y))
 
             origin_x = float(env_origin[0].cpu())
             origin_y = float(env_origin[1].cpu())
 
-            room_size_x = self.cfg.terrain.terrain_length
-            room_size_y = self.cfg.terrain.terrain_width
+            num_objects = 5
 
+            # hybrid base layout (asymmetric, covers space well)
+            base_positions = [
+                (-2.0, -3.0),
+                ( 2.5, -1.5),
+                (-1.0,  1.5),
+                ( 2.0,  3.0),
+                ( 0.0,  0.0),
+            ]
 
-            # =========================
+            safe_radius = 5.0
+            min_dist = 1.0
+            max_tries = 30
+
+            final_positions = []
+
+            for (dx, dy) in base_positions:
+
+                placed = False
+
+                for _ in range(max_tries):
+
+                    # base position relative to robot
+                    x = origin_x + dx
+                    y = origin_y + dy
+
+                    # jitter for realism + obstacle avoidance
+                    x += np.random.uniform(-0.5, 0.5)
+                    y += np.random.uniform(-0.5, 0.5)
+
+                    # boundary constraint
+                    if np.linalg.norm([x - origin_x, y - origin_y]) > safe_radius:
+                        continue
+
+                    # spacing constraint
+                    if any(np.linalg.norm([x - px, y - py]) < min_dist for px, py in final_positions):
+                        continue
+
+                    # optional terrain check
+                    if hasattr(self, "is_valid_terrain"):
+                        try:
+                            if not self.is_valid_terrain(x, y):
+                                continue
+                        except:
+                            pass
+
+                    final_positions.append((x, y))
+                    placed = True
+                    break
+
+                if not placed:
+                    print("fallback placement used")
+                    final_positions.append((origin_x + dx, origin_y + dy))
+
+            # unpack
+            (gx, gy), (sx, sy), (mx, my), (cx, cy), (bx, by) = final_positions
+
+            # XXXXXXXXXXXXXXXXXXXXXXXXXX
             # GUITAR
-            # =========================
-            texture = self.gym.create_texture_from_file(
+            # XXXXXXXXXXXXXXXXXXXXXXXXXX
+
+            guitar_texture = self.gym.create_texture_from_file(
                 self.sim,
                 "/home/anubhav1772/Documents/lab/wtw-aliengo/resources/objects/guitar_new/textures/guitar_BaseColor.png"
             )
 
-            # gx, gy = self.sample_position(origin_x, origin_y, room_size_x, room_size_y)
-            gx, gy = self.sample_non_overlapping(origin_x, origin_y, room_size_x, room_size_y, placed_positions, min_dist=2.0)
-            placed_positions.append((gx, gy))
-
-            z = env_origin[2].item()
+            # gx, gy = get_next_valid()
+            gz = env_origin[2].item()
 
             pose = gymapi.Transform()
-            pose.p = gymapi.Vec3(gx, gy, z - 1.3)
+            pose.p = gymapi.Vec3(gx, gy, gz - 1.3)
             pose.r = gymapi.Quat.from_euler_zyx(1.57, 0, 1.57 + 0.785)
 
-            # pose = gymapi.Transform()
-            # pose.p = gymapi.Vec3(gx, gy, 1.0)   # higher for visibility
-            # pose.r = gymapi.Quat.from_euler_zyx(np.pi, np.pi, np.pi)
-
             guitar_handle = self.gym.create_actor(
-                env_handle,
-                self.guitar_asset,
-                pose,
-                "guitar",
-                i,
-                0, # enable collison
-                0
+                env_handle, self.guitar_asset, pose, "guitar", i, 0, 0
             )
 
-            # rb_states = self.gym.get_actor_rigid_body_states(
-            #     env_handle,
-            #     guitar_handle,
-            #     gymapi.STATE_POS
-            # )
-            # print("INIT Z:", rb_states['pose']['p'][0][2])
+            # print(self.gym.get_actor_rigid_body_names(env_handle, guitar_handle))
+            num_guitar_bodies = self.gym.get_actor_rigid_body_count(env_handle, guitar_handle)
 
-            # color (if texture missing)
-            # color = gymapi.Vec3(0.6, 0.3, 0.1)
-            # self.gym.set_rigid_body_color(
+            for b in range(num_guitar_bodies):
+                self.gym.set_rigid_body_texture(
+                    env_handle,
+                    guitar_handle,
+                    b,
+                    gymapi.MESH_VISUAL,
+                    guitar_texture
+                )
+
+            # self.gym.set_rigid_body_texture(
             #     env_handle,
             #     guitar_handle,
-            #     0,
+            #     0,  # body index
             #     gymapi.MESH_VISUAL,
-            #     color
+            #     guitar_texture
             # )
 
-            self.gym.set_rigid_body_texture(
-                env_handle,
-                guitar_handle,
-                0,  # body index
-                gymapi.MESH_VISUAL,
-                texture
-            )
-
-            guitar_idx = self.gym.get_actor_index(env_handle, guitar_handle, gymapi.DOMAIN_SIM)
-            self.guitar_indices.append(guitar_idx)
-
-            # store correct position
-            guitar_pos = np.array([gx, gy])
-
-
-            # =========================
+            # XXXXXXXXXXXXXXXXXXXXXXXXXX
             # SHOES
-            # =========================
-            texture = self.gym.create_texture_from_file(
+            # XXXXXXXXXXXXXXXXXXXXXXXXXX
+
+            shoes_texture = self.gym.create_texture_from_file(
                 self.sim,
                 "/home/anubhav1772/Documents/lab/wtw-aliengo/resources/objects/shoes/textures/nb574.jpg"
             )
 
-            # SINGLE FLOWERPOT
-            # sx, sy = self.sample_position(origin_x, origin_y, room_size_x, room_size_y)
-            sx, sy = self.sample_non_overlapping(origin_x, origin_y, room_size_x, room_size_y, placed_positions, min_dist=1.0)
-            placed_positions.append((sx, sy))
-
-            z = env_origin[2].item()
+            # sx, sy = get_next_valid()
+            sz = env_origin[2].item()
 
             pose = gymapi.Transform()
-            pose.p = gymapi.Vec3(sx, sy, z - 1.2)   # small offset so it sits ON ground
+            pose.p = gymapi.Vec3(sx, sy, sz - 1.2)
             pose.r = gymapi.Quat.from_euler_zyx(0, 0, 0)
 
             shoes_handle = self.gym.create_actor(
-                env_handle,
-                self.shoes_asset,
-                pose,
-                "shoes",
-                i,
-                0, # 1(disable collisions)
-                0
+                env_handle, self.shoes_asset, pose, "shoes", i, 0, 0
             )
 
-            # self.gym.set_actor_rigid_body_properties(
+            num_shoe_bodies = self.gym.get_actor_rigid_body_count(env_handle, shoes_handle)
+
+            for b in range(num_shoe_bodies):
+                self.gym.set_rigid_body_texture(
+                    env_handle,
+                    shoes_handle,
+                    b,
+                    gymapi.MESH_VISUAL,
+                    shoes_texture
+                )
+
+            # self.gym.set_rigid_body_texture(
             #     env_handle,
             #     shoes_handle,
-            #     self.gym.get_actor_rigid_body_properties(env_handle, pot_handle),
-            #     recomputeInertia=False
-            # )
-
-            self.gym.set_rigid_body_texture(
-                env_handle,
-                shoes_handle,
-                0,  # body index
-                gymapi.MESH_VISUAL,
-                texture
-            )
-
-            # # color
-            # self.gym.set_rigid_body_color(
-            #     env_handle,
-            #     shoes_handle,
-            #     0,
+            #     0,  # body index
             #     gymapi.MESH_VISUAL,
-            #     gymapi.Vec3(0.8, 0.2, 0.2)
+            #     shoes_texture
             # )
 
-            # =========================
-            # NASA Mug
-            # =========================
+            # XXXXXXXXXXXXXXXXXXXXXXXXXX
+            # NASA MUG
+            # XXXXXXXXXXXXXXXXXXXXXXXXXX
+
             mug_texture = self.gym.create_texture_from_file(
                 self.sim,
                 "/home/anubhav1772/Documents/lab/wtw-aliengo/resources/objects/mug/textures/Mug_D.tga.png"
             )
 
-            # mx, my = self.sample_position(origin_x, origin_y, room_size_x, room_size_y)
-            mx, my = self.sample_non_overlapping(origin_x, origin_y, room_size_x, room_size_y, placed_positions, min_dist=1.0)
-            placed_positions.append((mx, my))
+            # mx, my = get_next_valid()
+            mz = env_origin[2].item()
 
             pose = gymapi.Transform()
-            mz = env_origin[2].item()
-            pose.p = gymapi.Vec3(mx, my, mz-2.0)   # keep high for visibility
+            pose.p = gymapi.Vec3(mx, my, mz - 2.0)
             pose.r = gymapi.Quat.from_euler_zyx(1.57, 0, 1.57)
 
             mug_handle = self.gym.create_actor(
-                env_handle,
-                self.mug_asset,
-                pose,
-                "mug",
-                i,
-                0, # 1(disable collisions)
-                0
+                env_handle, self.mug_asset, pose, "mug", i, 0, 0
             )
 
-            # self.gym.set_actor_rigid_body_properties(
-            #     env_handle,
-            #     shoes_handle,
-            #     self.gym.get_actor_rigid_body_properties(env_handle, pot_handle),
-            #     recomputeInertia=False
-            # )
+            num_mug_bodies = self.gym.get_actor_rigid_body_count(env_handle, mug_handle)
 
-            self.gym.set_rigid_body_texture(
-                env_handle,
-                mug_handle,
-                0,  # body index
-                gymapi.MESH_VISUAL,
-                mug_texture
-            )
+            for b in range(num_mug_bodies):
+                self.gym.set_rigid_body_texture(
+                    env_handle,
+                    mug_handle,
+                    b,
+                    gymapi.MESH_VISUAL,
+                    mug_texture
+                )
 
-            # color
-            # self.gym.set_rigid_body_color(
+            # self.gym.set_rigid_body_texture(
             #     env_handle,
-            #     flowerpot_handle,
-            #     0,
+            #     mug_handle,
+            #     0,  # body index
             #     gymapi.MESH_VISUAL,
-            #     gymapi.Vec3(0.8, 0.2, 0.2)
+            #     mug_texture
             # )
 
-            # =========================
-            # Office Chair
-            # =========================
+            # XXXXXXXXXXXXXXXXXXXXXXXXXX
+            # OFFICE CHAIR
+            # XXXXXXXXXXXXXXXXXXXXXXXXXX
+
             chair_texture = self.gym.create_texture_from_file(
                 self.sim,
                 "/home/anubhav1772/Documents/lab/wtw-aliengo/resources/objects/office_chair/textures/OfficeChair_OfficeChair_Main_BaseColor.png"
             )
 
-            # mx, my = self.sample_position(origin_x, origin_y, room_size_x, room_size_y)
-            cx, cy = self.sample_non_overlapping(origin_x, origin_y, room_size_x, room_size_y, placed_positions, min_dist=1.0)
-            placed_positions.append((cx, cy))
+            # cx, cy = get_next_valid()
+            cz = env_origin[2].item()
 
             pose = gymapi.Transform()
-            cz = env_origin[2].item()
-            pose.p = gymapi.Vec3(cx, cy, cz-2.0)   # keep high for visibility
+            pose.p = gymapi.Vec3(cx, cy, cz - 3.0)
             pose.r = gymapi.Quat.from_euler_zyx(1.57, 0, 1.57)
 
             chair_handle = self.gym.create_actor(
-                env_handle,
-                self.chair_asset,
-                pose,
-                "chair",
-                i,
-                0, # 1(disable collisions)
-                0
+                env_handle, self.chair_asset, pose, "chair", i, 0, 0
             )
 
-            # self.gym.set_actor_rigid_body_properties(
+            num_chair_bodies = self.gym.get_actor_rigid_body_count(env_handle, chair_handle)
+
+            for b in range(num_chair_bodies):
+                self.gym.set_rigid_body_texture(
+                    env_handle,
+                    chair_handle,
+                    b,
+                    gymapi.MESH_VISUAL,
+                    chair_texture
+                )
+
+            # self.gym.set_rigid_body_texture(
             #     env_handle,
             #     chair_handle,
-            #     self.gym.get_actor_rigid_body_properties(env_handle, chair_handle),
-            #     recomputeInertia=False
+            #     0,  # body index
+            #     gymapi.MESH_VISUAL,
+            #     chair_texture
             # )
 
-            self.gym.set_rigid_body_texture(
-                env_handle,
-                chair_handle,
-                0,  # body index
-                gymapi.MESH_VISUAL,
-                chair_texture
-            )
+            # XXXXXXXXXXXXXXXXXXXXXXXXXX
+            # BAGPACK
+            # XXXXXXXXXXXXXXXXXXXXXXXXXX
 
-            # =========================
-            # Bagpack
-            # =========================
             bag_texture = self.gym.create_texture_from_file(
                  self.sim,
                  "/home/anubhav1772/Documents/lab/wtw-aliengo/resources/objects/bagpack/textures/Male_Backpack_Metropolis_002_D.png"
              )
 
-            # bx, by = self.sample_position(origin_x, origin_y, room_size_x, room_size_y)
-            bx, by = self.sample_non_overlapping(origin_x, origin_y, room_size_x, room_size_y, placed_positions, min_dist=1.0)
-            placed_positions.append((bx, by))
+            # bx, by = get_next_valid()
+            bz = env_origin[2].item()
 
             pose = gymapi.Transform()
-            bz = env_origin[2].item()
-            pose.p = gymapi.Vec3(bx, by, bz-2.0)   # keep high for visibility
+            pose.p = gymapi.Vec3(bx, by, bz - 2.0)
             pose.r = gymapi.Quat.from_euler_zyx(1.57, 0, 1.57)
 
             bag_handle = self.gym.create_actor(
-                env_handle,
-                self.bag_asset,
-                pose,
-                "bagpack",
-                i,
-                0, # 1(disable collisions)
-                0
+                env_handle, self.bag_asset, pose, "bagpack", i, 0, 0
             )
 
-            # self.gym.set_actor_rigid_body_properties(
+            num_bag_bodies = self.gym.get_actor_rigid_body_count(env_handle, bag_handle)
+
+            for b in range(num_bag_bodies):
+                self.gym.set_rigid_body_texture(
+                    env_handle,
+                    bag_handle,
+                    b,
+                    gymapi.MESH_VISUAL,
+                    bag_texture
+                )
+
+            # self.gym.set_rigid_body_texture(
             #     env_handle,
             #     bag_handle,
-            #     self.gym.get_actor_rigid_body_properties(env_handle, bag_handle),
-            #     recomputeInertia=False
-            # )
-
-            self.gym.set_rigid_body_texture(
-                env_handle,
-                bag_handle,
-                0,  # body index
-                gymapi.MESH_VISUAL,
-                bag_texture
-            )
-
-            # color
-            # self.gym.set_rigid_body_color(
-            #     env_handle,
-            #     bag_handle,
-            #     0,
+            #     0,  # body index
             #     gymapi.MESH_VISUAL,
-            #     gymapi.Vec3(0.8, 0.2, 0.2)
+            #     bag_texture
             # )
+
+            # STORE GT POSITIONS
+            if not hasattr(self, "object_positions"):
+                self.object_positions = {}
+
+            self.object_positions[i] = {
+                "guitar": (gx, gy),
+                "shoes": (sx, sy),
+                "mug": (mx, my),
+                "chair": (cx, cy),
+                "bag": (bx, by),
+            }
+
+            # env_origin = self.env_origins[i]
+            #
+            # origin_x = float(env_origin[0].cpu())
+            # origin_y = float(env_origin[1].cpu())
+            #
+            # room_size_x = self.cfg.terrain.terrain_length
+            # room_size_y = self.cfg.terrain.terrain_width
+            #
+            #
+            # # =========================
+            # # GUITAR
+            # # =========================
+            # texture = self.gym.create_texture_from_file(
+            #     self.sim,
+            #     "/home/anubhav1772/Documents/lab/wtw-aliengo/resources/objects/guitar_new/textures/guitar_BaseColor.png"
+            # )
+            #
+            # # gx, gy = self.sample_position(origin_x, origin_y, room_size_x, room_size_y)
+            # gx, gy = self.sample_non_overlapping(origin_x, origin_y, room_size_x, room_size_y, placed_positions, min_dist=2.0)
+            # placed_positions.append((gx, gy))
+            #
+            # z = env_origin[2].item()
+            #
+            # pose = gymapi.Transform()
+            # pose.p = gymapi.Vec3(gx, gy, z - 1.3)
+            # pose.r = gymapi.Quat.from_euler_zyx(1.57, 0, 1.57 + 0.785)
+            #
+            # # pose = gymapi.Transform()
+            # # pose.p = gymapi.Vec3(gx, gy, 1.0)   # higher for visibility
+            # # pose.r = gymapi.Quat.from_euler_zyx(np.pi, np.pi, np.pi)
+            #
+            # guitar_handle = self.gym.create_actor(
+            #     env_handle,
+            #     self.guitar_asset,
+            #     pose,
+            #     "guitar",
+            #     i,
+            #     0, # enable collison
+            #     0
+            # )
+            #
+            # # rb_states = self.gym.get_actor_rigid_body_states(
+            # #     env_handle,
+            # #     guitar_handle,
+            # #     gymapi.STATE_POS
+            # # )
+            # # print("INIT Z:", rb_states['pose']['p'][0][2])
+            #
+            # # color (if texture missing)
+            # # color = gymapi.Vec3(0.6, 0.3, 0.1)
+            # # self.gym.set_rigid_body_color(
+            # #     env_handle,
+            # #     guitar_handle,
+            # #     0,
+            # #     gymapi.MESH_VISUAL,
+            # #     color
+            # # )
+            #
+            # self.gym.set_rigid_body_texture(
+            #     env_handle,
+            #     guitar_handle,
+            #     0,  # body index
+            #     gymapi.MESH_VISUAL,
+            #     texture
+            # )
+            #
+            # guitar_idx = self.gym.get_actor_index(env_handle, guitar_handle, gymapi.DOMAIN_SIM)
+            # self.guitar_indices.append(guitar_idx)
+            #
+            # # store correct position
+            # guitar_pos = np.array([gx, gy])
+            #
+            #
+            # # =========================
+            # # SHOES
+            # # =========================
+            # texture = self.gym.create_texture_from_file(
+            #     self.sim,
+            #     "/home/anubhav1772/Documents/lab/wtw-aliengo/resources/objects/shoes/textures/nb574.jpg"
+            # )
+            #
+            # # SINGLE FLOWERPOT
+            # # sx, sy = self.sample_position(origin_x, origin_y, room_size_x, room_size_y)
+            # sx, sy = self.sample_non_overlapping(origin_x, origin_y, room_size_x, room_size_y, placed_positions, min_dist=1.0)
+            # placed_positions.append((sx, sy))
+            #
+            # z = env_origin[2].item()
+            #
+            # pose = gymapi.Transform()
+            # pose.p = gymapi.Vec3(sx, sy, z - 1.2)   # small offset so it sits ON ground
+            # pose.r = gymapi.Quat.from_euler_zyx(0, 0, 0)
+            #
+            # shoes_handle = self.gym.create_actor(
+            #     env_handle,
+            #     self.shoes_asset,
+            #     pose,
+            #     "shoes",
+            #     i,
+            #     0, # 1(disable collisions)
+            #     0
+            # )
+            #
+            # # self.gym.set_actor_rigid_body_properties(
+            # #     env_handle,
+            # #     shoes_handle,
+            # #     self.gym.get_actor_rigid_body_properties(env_handle, pot_handle),
+            # #     recomputeInertia=False
+            # # )
+            #
+            # self.gym.set_rigid_body_texture(
+            #     env_handle,
+            #     shoes_handle,
+            #     0,  # body index
+            #     gymapi.MESH_VISUAL,
+            #     texture
+            # )
+            #
+            # # # color
+            # # self.gym.set_rigid_body_color(
+            # #     env_handle,
+            # #     shoes_handle,
+            # #     0,
+            # #     gymapi.MESH_VISUAL,
+            # #     gymapi.Vec3(0.8, 0.2, 0.2)
+            # # )
+            #
+            # # =========================
+            # # NASA Mug
+            # # =========================
+            # mug_texture = self.gym.create_texture_from_file(
+            #     self.sim,
+            #     "/home/anubhav1772/Documents/lab/wtw-aliengo/resources/objects/mug/textures/Mug_D.tga.png"
+            # )
+            #
+            # # mx, my = self.sample_position(origin_x, origin_y, room_size_x, room_size_y)
+            # mx, my = self.sample_non_overlapping(origin_x, origin_y, room_size_x, room_size_y, placed_positions, min_dist=1.0)
+            # placed_positions.append((mx, my))
+            #
+            # pose = gymapi.Transform()
+            # mz = env_origin[2].item()
+            # pose.p = gymapi.Vec3(mx, my, mz-2.0)   # keep high for visibility
+            # pose.r = gymapi.Quat.from_euler_zyx(1.57, 0, 1.57)
+            #
+            # mug_handle = self.gym.create_actor(
+            #     env_handle,
+            #     self.mug_asset,
+            #     pose,
+            #     "mug",
+            #     i,
+            #     0, # 1(disable collisions)
+            #     0
+            # )
+            #
+            # # self.gym.set_actor_rigid_body_properties(
+            # #     env_handle,
+            # #     shoes_handle,
+            # #     self.gym.get_actor_rigid_body_properties(env_handle, pot_handle),
+            # #     recomputeInertia=False
+            # # )
+            #
+            # self.gym.set_rigid_body_texture(
+            #     env_handle,
+            #     mug_handle,
+            #     0,  # body index
+            #     gymapi.MESH_VISUAL,
+            #     mug_texture
+            # )
+            #
+            # # color
+            # # self.gym.set_rigid_body_color(
+            # #     env_handle,
+            # #     flowerpot_handle,
+            # #     0,
+            # #     gymapi.MESH_VISUAL,
+            # #     gymapi.Vec3(0.8, 0.2, 0.2)
+            # # )
+            #
+            # # =========================
+            # # Office Chair
+            # # =========================
+            # chair_texture = self.gym.create_texture_from_file(
+            #     self.sim,
+            #     "/home/anubhav1772/Documents/lab/wtw-aliengo/resources/objects/office_chair/textures/OfficeChair_OfficeChair_Main_BaseColor.png"
+            # )
+            #
+            # # mx, my = self.sample_position(origin_x, origin_y, room_size_x, room_size_y)
+            # cx, cy = self.sample_non_overlapping(origin_x, origin_y, room_size_x, room_size_y, placed_positions, min_dist=1.0)
+            # placed_positions.append((cx, cy))
+            #
+            # pose = gymapi.Transform()
+            # cz = env_origin[2].item()
+            # pose.p = gymapi.Vec3(cx, cy, cz-2.0)   # keep high for visibility
+            # pose.r = gymapi.Quat.from_euler_zyx(1.57, 0, 1.57)
+            #
+            # chair_handle = self.gym.create_actor(
+            #     env_handle,
+            #     self.chair_asset,
+            #     pose,
+            #     "chair",
+            #     i,
+            #     0, # 1(disable collisions)
+            #     0
+            # )
+            #
+            # # self.gym.set_actor_rigid_body_properties(
+            # #     env_handle,
+            # #     chair_handle,
+            # #     self.gym.get_actor_rigid_body_properties(env_handle, chair_handle),
+            # #     recomputeInertia=False
+            # # )
+            #
+            # self.gym.set_rigid_body_texture(
+            #     env_handle,
+            #     chair_handle,
+            #     0,  # body index
+            #     gymapi.MESH_VISUAL,
+            #     chair_texture
+            # )
+            #
+            # # =========================
+            # # Bagpack
+            # # =========================
+            # bag_texture = self.gym.create_texture_from_file(
+            #      self.sim,
+            #      "/home/anubhav1772/Documents/lab/wtw-aliengo/resources/objects/bagpack/textures/Male_Backpack_Metropolis_002_D.png"
+            #  )
+            #
+            # # bx, by = self.sample_position(origin_x, origin_y, room_size_x, room_size_y)
+            # bx, by = self.sample_non_overlapping(origin_x, origin_y, room_size_x, room_size_y, placed_positions, min_dist=1.0)
+            # placed_positions.append((bx, by))
+            #
+            # pose = gymapi.Transform()
+            # bz = env_origin[2].item()
+            # pose.p = gymapi.Vec3(bx, by, bz-2.0)   # keep high for visibility
+            # pose.r = gymapi.Quat.from_euler_zyx(1.57, 0, 1.57)
+            #
+            # bag_handle = self.gym.create_actor(
+            #     env_handle,
+            #     self.bag_asset,
+            #     pose,
+            #     "bagpack",
+            #     i,
+            #     0, # 1(disable collisions)
+            #     0
+            # )
+            #
+            # # self.gym.set_actor_rigid_body_properties(
+            # #     env_handle,
+            # #     bag_handle,
+            # #     self.gym.get_actor_rigid_body_properties(env_handle, bag_handle),
+            # #     recomputeInertia=False
+            # # )
+            #
+            # self.gym.set_rigid_body_texture(
+            #     env_handle,
+            #     bag_handle,
+            #     0,  # body index
+            #     gymapi.MESH_VISUAL,
+            #     bag_texture
+            # )
+            #
+            # # color
+            # # self.gym.set_rigid_body_color(
+            # #     env_handle,
+            # #     bag_handle,
+            # #     0,
+            # #     gymapi.MESH_VISUAL,
+            # #     gymapi.Vec3(0.8, 0.2, 0.2)
+            # # )
 
             # =========================================================
             # WALL-ALIGNED MARKERS
