@@ -87,7 +87,7 @@ class Terrain:
             terrain = self.make_terrain(cfg, choice, difficulty, cfg.proportions)
             # self.add_terrain_to_map(cfg, terrain, i, j)
             # self.add_scene1_to_map(cfg, terrain, i, j)
-            self.add_scene2_to_map(cfg, terrain, i, j)
+            self.add_scene3_to_map(cfg, terrain, i, j)
 
     def curriculum(self, cfg):
         for j in range(cfg.num_cols):
@@ -98,7 +98,7 @@ class Terrain:
                 terrain = self.make_terrain(cfg, choice, difficulty, cfg.proportions)
                 # self.add_terrain_to_map(cfg, terrain, i, j)
                 # self.add_scene1_to_map(cfg, terrain, i, j)
-                self.add_scene2_to_map(cfg, terrain, i, j)
+                self.add_scene3_to_map(cfg, terrain, i, j)
 
     def selected_terrain(self, cfg):
         terrain_type = cfg.terrain_kwargs.pop('type')
@@ -115,7 +115,7 @@ class Terrain:
             eval(terrain_type)(terrain, **cfg.terrain_kwargs.terrain_kwargs)
             # self.add_terrain_to_map(cfg, terrain, i, j)
             # self.add_scene1_to_map(cfg, terrain, i, j)
-            self.add_scene2_to_map(cfg, terrain, i, j)
+            self.add_scene3_to_map(cfg, terrain, i, j)
 
     def make_terrain(self, cfg, choice, difficulty, proportions):
         terrain = terrain_utils.SubTerrain("terrain",
@@ -459,3 +459,157 @@ class Terrain:
         env_origin_z = np.max(tile) * terrain.vertical_scale
 
         cfg.env_origins[i, j] = [env_origin_x, env_origin_y, env_origin_z]
+
+    def add_scene3_to_map(self, cfg, terrain, row, col):
+
+        start_x = cfg.border
+        end_x   = cfg.border + cfg.length_per_env_pixels
+        start_y = cfg.border
+        end_y   = cfg.border + cfg.width_per_env_pixels
+
+        tile = terrain.height_field_raw.copy()
+        tile[:, :] = 0
+
+        H, W = tile.shape
+
+        # wall parameters
+        wall_thickness = 4
+        wall_height = 1.5
+        h = wall_height / terrain.vertical_scale
+
+        # fully sealed outer boundary
+        tile[:, :wall_thickness] = h
+        tile[:, -wall_thickness:] = h
+        tile[:wall_thickness, :] = h
+        tile[-wall_thickness:, :] = h
+
+        # strong grooves on outer walls
+        for _ in range(500):
+            x = np.random.randint(1, H-1)
+            y = np.random.randint(1, W-1)
+
+            if (
+                x < wall_thickness or x >= H - wall_thickness or
+                y < wall_thickness or y >= W - wall_thickness
+            ):
+                tile[x, y] = int(h * np.random.uniform(0.4, 1.4))
+
+        # corridor
+        corridor_width = W // 3
+        corridor_center = np.random.randint(W//3, 2*W//3)
+
+        y1 = max(0, corridor_center - corridor_width // 2)
+        y2 = min(W, corridor_center + corridor_width // 2)
+
+        tile[:, y1:y2] = 0
+
+        # horizontal connectors
+        for _ in range(2):
+            x = np.random.randint(H//4, 3*H//4)
+            x1 = max(0, x-2)
+            x2 = min(H, x+2)
+            tile[x1:x2, :] = 0
+
+        # obstacles outside corridor
+        num_obstacles = np.random.randint(6, 10)
+
+        for _ in range(num_obstacles):
+
+            x = np.random.randint(10, H - 25)
+
+            if np.random.rand() < 0.5:
+                y = np.random.randint(5, max(6, y1 - 5))
+            else:
+                y = np.random.randint(min(W-25, y2 + 5), W - 10)
+
+            if np.random.rand() < 0.5:
+                length = np.random.randint(10, 20)
+                thickness = np.random.randint(2, 4)
+
+                x_end = min(x + length, H)
+                y_end = min(y + thickness, W)
+
+                tile[x:x_end, y:y_end] = h
+                obs_slice = (slice(x, x_end), slice(y, y_end))
+
+            else:
+                length = np.random.randint(10, 20)
+                thickness = np.random.randint(2, 4)
+
+                x_end = min(x + thickness, H)
+                y_end = min(y + length, W)
+
+                tile[x:x_end, y:y_end] = h
+                obs_slice = (slice(x, x_end), slice(y, y_end))
+
+            # grooves on obstacle surfaces
+            for _ in range(50):
+                if obs_slice[0].stop > obs_slice[0].start and obs_slice[1].stop > obs_slice[1].start:
+                    gx = np.random.randint(obs_slice[0].start, obs_slice[0].stop)
+                    gy = np.random.randint(obs_slice[1].start, obs_slice[1].stop)
+                    tile[gx, gy] = int(h * np.random.uniform(0.5, 1.3))
+
+        # landmark blocks
+        for _ in range(4):
+            x = np.random.randint(20, H-20)
+            y = np.random.randint(20, W-20)
+
+            x_end = min(x+6, H)
+            y_end = min(y+6, W)
+
+            tile[x:x_end, y:y_end] = int(h * 1.2)
+
+            # grooves on landmarks
+            for _ in range(30):
+                gx = np.random.randint(x, x_end)
+                gy = np.random.randint(y, y_end)
+                tile[gx, gy] = int(h * np.random.uniform(0.6, 1.4))
+
+        # global grooves on all walls/obstacles
+        for _ in range(400):
+            x = np.random.randint(5, H - 5)
+            y = np.random.randint(5, W - 5)
+
+            if tile[x, y] > 0:
+                tile[x, y] = int(tile[x, y] * np.random.uniform(0.5, 0.9))
+
+        # edge features
+        for _ in range(400):
+            x = np.random.randint(5, H - 5)
+            y = np.random.randint(5, W - 5)
+
+            if tile[x, y] > 0 and (
+                tile[x+1, y] == 0 or tile[x-1, y] == 0 or
+                tile[x, y+1] == 0 or tile[x, y-1] == 0
+            ):
+                tile[x, y] = int(h * np.random.uniform(0.6, 1.5))
+
+        # spawn safe zone
+        cx, cy = H // 2, W // 2
+        tile[cx-15:cx+15, cy-15:cy+15] = 0
+
+        # re-enforce fully sealed outer boundary (FINAL STEP)
+        tile[:, :wall_thickness] = h
+        tile[:, -wall_thickness:] = h
+        tile[:wall_thickness, :] = h
+        tile[-wall_thickness:, :] = h
+
+        # re-apply grooves to outer walls (after sealing)
+        for _ in range(300):
+            x = np.random.randint(1, H-1)
+            y = np.random.randint(1, W-1)
+
+            if (
+                x < wall_thickness or x >= H - wall_thickness or
+                y < wall_thickness or y >= W - wall_thickness
+            ):
+                tile[x, y] = int(h * np.random.uniform(0.5, 1.4))
+
+        self.height_field_raw[start_x:end_x, start_y:end_y] = tile
+
+        # origin
+        env_origin_x = cfg.terrain_length / 2 + cfg.x_offset * terrain.horizontal_scale
+        env_origin_y = cfg.terrain_width / 2
+        env_origin_z = np.max(tile) * terrain.vertical_scale
+
+        cfg.env_origins[row, col] = [env_origin_x, env_origin_y, env_origin_z]
