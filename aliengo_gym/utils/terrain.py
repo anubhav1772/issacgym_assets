@@ -608,8 +608,31 @@ class Terrain:
         self.height_field_raw[start_x:end_x, start_y:end_y] = tile
 
         # origin
-        env_origin_x = cfg.terrain_length / 2 + cfg.x_offset * terrain.horizontal_scale
-        env_origin_y = cfg.terrain_width / 2
-        env_origin_z = np.max(tile) * terrain.vertical_scale
+        # env_origin_x = cfg.terrain_length / 2 + cfg.x_offset * terrain.horizontal_scale
+        # env_origin_y = cfg.terrain_width / 2
+
+        margin = 1.0  # VERY important (avoid walls)
+
+        # choose one corner
+        corner = "bottom_left"   # bottom_left, bottom_right, top_left, top_right
+
+        if corner == "bottom_left":
+            env_origin_x = margin
+            env_origin_y = margin
+
+        elif corner == "bottom_right":
+            env_origin_x = cfg.terrain_length - margin
+            env_origin_y = margin
+
+        elif corner == "top_left":
+            env_origin_x = margin
+            env_origin_y = cfg.terrain_width - margin
+
+        elif corner == "top_right":
+            env_origin_x = cfg.terrain_length - margin
+            env_origin_y = cfg.terrain_width - margin
+
+        # env_origin_z = np.max(tile) * terrain.vertical_scale
+        env_origin_z = 0
 
         cfg.env_origins[row, col] = [env_origin_x, env_origin_y, env_origin_z]
