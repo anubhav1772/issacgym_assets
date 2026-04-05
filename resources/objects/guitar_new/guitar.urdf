@@ -9,7 +9,7 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0.3"/>
       <geometry>
-        <mesh filename="guitar-wood-10mb.obj" scale="0.01 0.01 0.01"/>
+        <mesh filename="guitar-wood-10mb.obj" scale="0.005 0.005 0.005"/>
       </geometry>
       <material name="white">
        <color rgba="1 1 1 1"/>
@@ -18,7 +18,7 @@
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0"/>
       <geometry>
-        <mesh filename="guitar-wood-10mb.obj" scale="0.01 0.01 0.01"/>
+        <mesh filename="guitar-wood-10mb.obj" scale="0.005 0.005 0.005"/>
         <!-- You could also specify the collision (for the guitar-wood-10mb) with a "box" tag: -->
         <!-- <box size=".06 .06 .06"/> -->
       </geometry>
