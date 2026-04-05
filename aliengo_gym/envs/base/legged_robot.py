@@ -1794,6 +1794,16 @@ class LeggedRobot(BaseTask):
         yaw = np.arctan2(origin_y - y, origin_x - x)
         return gymapi.Quat.from_euler_zyx(yaw, 0, 1.57)
 
+    def get_terrain_height(self, x, y, tile, origin_x, origin_y):
+        scale = self.cfg.terrain.horizontal_scale
+        xi = int((x - origin_x) / scale + tile.shape[0] // 2)
+        yi = int((y - origin_y) / scale + tile.shape[1] // 2)
+
+        xi = np.clip(xi, 0, tile.shape[0]-1)
+        yi = np.clip(yi, 0, tile.shape[1]-1)
+
+        return tile[xi, yi] * self.cfg.terrain.vertical_scale
+
     def _create_envs(self):
         """ Creates environments:
              1. loads the robot URDF/MJCF asset,
@@ -1955,12 +1965,92 @@ class LeggedRobot(BaseTask):
         )
         assert self.bag_asset is not None, "Bagpack asset NOT loaded"
 
+        person_asset_root = "/home/anubhav1772/Documents/lab/wtw-aliengo/resources/objects/person"
+        person_asset_file = "Capoeira.urdf"
+
+        asset_options = gymapi.AssetOptions()
+        asset_options.fix_base_link = True
+        asset_options.disable_gravity = True
+
+        self.person_asset = self.gym.load_asset(
+            self.sim,
+            person_asset_root,
+            person_asset_file,
+            asset_options
+        )
+        assert self.person_asset is not None, "Person asset NOT loaded"
+
+        bicycle_asset_root = "/home/anubhav1772/Documents/lab/wtw-aliengo/resources/objects/bicycle"
+        bicycle_asset_file = "bicycle.urdf"
+
+        asset_options = gymapi.AssetOptions()
+        asset_options.fix_base_link = True
+        asset_options.disable_gravity = True
+
+        self.bicycle_asset = self.gym.load_asset(
+            self.sim,
+            bicycle_asset_root,
+            bicycle_asset_file,
+            asset_options
+        )
+        assert self.bicycle_asset is not None, "Bicycle asset NOT loaded"
+
+        motorcycle_asset_root = "/home/anubhav1772/Documents/lab/wtw-aliengo/resources/objects/motorcycle"
+        motorcycle_asset_file = "Honda CB650R .urdf"
+
+        asset_options = gymapi.AssetOptions()
+        asset_options.fix_base_link = True
+        asset_options.disable_gravity = True
+
+        self.motorcycle_asset = self.gym.load_asset(
+            self.sim,
+            motorcycle_asset_root,
+            motorcycle_asset_file,
+            asset_options
+        )
+        assert self.motorcycle_asset is not None, "Motorcycle asset NOT loaded"
+
+        firehydrant_asset_root = "/home/anubhav1772/Documents/lab/wtw-aliengo/resources/objects/fire_hydrant"
+        firehydrant_asset_file = "model.urdf"
+
+        asset_options = gymapi.AssetOptions()
+        asset_options.fix_base_link = True
+        asset_options.disable_gravity = True
+
+        self.firehydrant_asset = self.gym.load_asset(
+            self.sim,
+            firehydrant_asset_root,
+            firehydrant_asset_file,
+            asset_options
+        )
+        assert self.firehydrant_asset is not None, "Fire Hydrant asset NOT loaded"
+
+        couch_asset_root = "/home/anubhav1772/Documents/lab/wtw-aliengo/resources/objects/couch"
+        couch_asset_file = "sofa_low.urdf"
+
+        asset_options = gymapi.AssetOptions()
+        asset_options.fix_base_link = True
+        asset_options.disable_gravity = True
+
+        self.couch_asset = self.gym.load_asset(
+            self.sim,
+            couch_asset_root,
+            couch_asset_file,
+            asset_options
+        )
+        assert self.couch_asset is not None, "Couch asset NOT loaded"
+
         OBJECT_RADII = {
             "guitar": 0.4,
             "shoes": 0.3,
             "mug": 0.25,
             "chair": 0.8,
-            "bag": 0.4
+            "bag": 0.4,
+            "person": 0.35,        # human footprint ~ shoulder width
+            "couch": 1.0,          # wide furniture
+            "bicycle": 0.8,        # length dominates footprint
+            "motorcycle": 1.0,     # similar to bike but bulkier
+            "fire_hydrant": 0.25   # small object
         }
 
         for i in range(self.num_envs):
@@ -2052,6 +2142,21 @@ class LeggedRobot(BaseTask):
             bx, by = self.sample_terrain_aware_position(tile, origin_x, origin_y, final_positions, OBJECT_RADII["bag"])
             final_positions.append((bx, by))
 
+            px, py = self.sample_terrain_aware_position(tile, origin_x, origin_y, final_positions, OBJECT_RADII["person"])
+            final_positions.append((px, py))
+
+            cox, coy = self.sample_terrain_aware_position(tile, origin_x, origin_y, final_positions, OBJECT_RADII["couch"])
+            final_positions.append((cox, coy))
+
+            mcx, mcy = self.sample_terrain_aware_position(tile, origin_x, origin_y, final_positions, OBJECT_RADII["motorcycle"])
+            final_positions.append((mcx, mcy))
+
+            bcx, bcy = self.sample_terrain_aware_position(tile, origin_x, origin_y, final_positions, OBJECT_RADII["bicycle"])
+            final_positions.append((bcx, bcy))
+
+            fx, fy = self.sample_terrain_aware_position(tile, origin_x, origin_y, final_positions, OBJECT_RADII["fire_hydrant"])
+            final_positions.append((fx, fy))
+
 
             # XXXXXXXXXXXXXXXXXXXXXXXXXX
             # GUITAR
@@ -2066,7 +2171,7 @@ class LeggedRobot(BaseTask):
             gz = env_origin[2].item()
 
             pose = gymapi.Transform()
-            pose.p = gymapi.Vec3(gx, gy, gz + 0.8)
+            pose.p = gymapi.Vec3(gx, gy, gz + 0.4)
             # pose.p = gymapi.Vec3(gx, gy, origin_z + 0.02)
             # pose.r = self.upright_quat_facing_robot(gx, gy, origin_x, origin_y)
             pose.r = gymapi.Quat.from_euler_zyx(1.57, 0, 1.57 + 0.785)
@@ -2095,6 +2200,14 @@ class LeggedRobot(BaseTask):
             #     guitar_texture
             # )
 
+            # self.gym.set_rigid_body_color(
+            #     env_handle,
+            #     guitar_handle,
+            #     0,
+            #     gymapi.MESH_VISUAL,
+            #     color
+            # )
+
             # XXXXXXXXXXXXXXXXXXXXXXXXXX
             # SHOES
             # XXXXXXXXXXXXXXXXXXXXXXXXXX
@@ -2108,7 +2221,7 @@ class LeggedRobot(BaseTask):
             sz = env_origin[2].item()
 
             pose = gymapi.Transform()
-            pose.p = gymapi.Vec3(sx, sy, sz - 1.2)
+            pose.p = gymapi.Vec3(sx, sy, sz - 3)
             # pose.r = self.face_robot_quat(sx, sy, origin_x, origin_y)
             # pose.p = gymapi.Vec3(sx, sy, origin_z + 0.02)
             # pose.r = self.face_robot_quat(sx, sy, origin_x, origin_y)
@@ -2192,7 +2305,7 @@ class LeggedRobot(BaseTask):
             cz = env_origin[2].item()
 
             pose = gymapi.Transform()
-            pose.p = gymapi.Vec3(cx, cy, cz - 3.0)
+            pose.p = gymapi.Vec3(cx, cy, cz - 4.0)
             # pose.r = self.face_robot_quat(cx, cy, origin_x, origin_y)
             # pose.p = gymapi.Vec3(cx, cy, origin_z + 0.02)
             # pose.r = self.face_robot_quat(cx, cy, origin_x, origin_y)
@@ -2263,6 +2376,176 @@ class LeggedRobot(BaseTask):
             #     bag_texture
             # )
 
+            # XXXXXXXXXXXXXXXXXXXXXXXXXX
+            # PERSON
+            # XXXXXXXXXXXXXXXXXXXXXXXXXX
+
+            person_texture = self.gym.create_texture_from_file(
+                self.sim,
+                "/home/anubhav1772/Documents/lab/wtw-aliengo/resources/objects/person/textures/Ch38_1001_Diffuse.png"
+            )
+
+            # px, py = get_next_valid()
+            pz = env_origin[2].item()
+
+            pose = gymapi.Transform()
+            pose.p = gymapi.Vec3(px, py, pz + 0.1)
+            # pose.p = gymapi.Vec3(gx, gy, origin_z + 0.02)
+            # pose.r = self.upright_quat_facing_robot(gx, gy, origin_x, origin_y)
+            pose.r = gymapi.Quat.from_euler_zyx(1.57, 0, 1.57)
+
+            person_handle = self.gym.create_actor(
+                env_handle, self.person_asset, pose, "person", i, 0, 0
+            )
+
+            # print(self.gym.get_actor_rigid_body_names(env_handle, person_handle))
+            num_person_bodies = self.gym.get_actor_rigid_body_count(env_handle, person_handle)
+
+            for b in range(num_person_bodies):
+                self.gym.set_rigid_body_texture(
+                    env_handle,
+                    person_handle,
+                    b,
+                    gymapi.MESH_VISUAL,
+                    person_texture
+                )
+
+            # XXXXXXXXXXXXXXXXXXXXXXXXXX
+            # COUCH
+            # XXXXXXXXXXXXXXXXXXXXXXXXXX
+
+            couch_texture = self.gym.create_texture_from_file(
+                self.sim,
+                "/home/anubhav1772/Documents/lab/wtw-aliengo/resources/objects/couch/textures/lambert1_Base_Color.png"
+            )
+
+            # cox, coy = get_next_valid()
+            coz = env_origin[2].item()
+
+            pose = gymapi.Transform()
+            pose.p = gymapi.Vec3(cox, coy, coz + 0.1)
+            # pose.p = gymapi.Vec3(cox, coy, origin_z + 0.02)
+            # pose.r = self.upright_quat_facing_robot(cox, coy, origin_x, origin_y)
+            pose.r = gymapi.Quat.from_euler_zyx(1.57, 0, 0)
+
+            couch_handle = self.gym.create_actor(
+                env_handle, self.couch_asset, pose, "couch", i, 0, 0
+            )
+
+            # print(self.gym.get_actor_rigid_body_names(env_handle, couch_handle))
+            num_couch_bodies = self.gym.get_actor_rigid_body_count(env_handle, couch_handle)
+
+            for b in range(num_couch_bodies):
+                self.gym.set_rigid_body_texture(
+                    env_handle,
+                    couch_handle,
+                    b,
+                    gymapi.MESH_VISUAL,
+                    couch_texture
+                )
+
+            # XXXXXXXXXXXXXXXXXXXXXXXXXX
+            # BICYCLE
+            # XXXXXXXXXXXXXXXXXXXXXXXXXX
+
+            bicycle_texture = self.gym.create_texture_from_file(
+                self.sim,
+                "/home/anubhav1772/Documents/lab/wtw-aliengo/resources/objects/bicycle/textures/bicycle_bicycle_BaseColor.jpeg"
+            )
+
+            # bcx, bcy = get_next_valid()
+            bcz = env_origin[2].item()
+
+            pose = gymapi.Transform()
+            pose.p = gymapi.Vec3(bcx, bcy, bcz + 1.0)
+            # pose.p = gymapi.Vec3(bcx, bcy, origin_z + 0.02)
+            # pose.r = self.upright_quat_facing_robot(bcx, bcy, origin_x, origin_y)
+            pose.r = gymapi.Quat.from_euler_zyx(1.57, 0, 0)
+
+            bicycle_handle = self.gym.create_actor(
+                env_handle, self.bicycle_asset, pose, "bicycle", i, 0, 0
+            )
+
+            # print(self.gym.get_actor_rigid_body_names(env_handle, bicycle_handle))
+            num_bicycle_bodies = self.gym.get_actor_rigid_body_count(env_handle, bicycle_handle)
+
+            for b in range(num_bicycle_bodies):
+                self.gym.set_rigid_body_texture(
+                    env_handle,
+                    bicycle_handle,
+                    b,
+                    gymapi.MESH_VISUAL,
+                    bicycle_texture
+                )
+
+            # XXXXXXXXXXXXXXXXXXXXXXXXXX
+            # MOTORCYCLE
+            # XXXXXXXXXXXXXXXXXXXXXXXXXX
+
+            motorcycle_texture = self.gym.create_texture_from_file(
+                self.sim,
+                "/home/anubhav1772/Documents/lab/wtw-aliengo/resources/objects/bicycle/textures/bicycle_bicycle_BaseColor.jpeg"
+            )
+
+            # mcx, mcy = get_next_valid()
+            mcz = env_origin[2].item()
+
+            pose = gymapi.Transform()
+            pose.p = gymapi.Vec3(mcx, mcy, mcz + 0.3)
+            # pose.p = gymapi.Vec3(mcx, mcy, origin_z + 0.02)
+            # pose.r = self.upright_quat_facing_robot(mcx, mcy, origin_x, origin_y)
+            pose.r = gymapi.Quat.from_euler_zyx(1.57, 0, 0)
+
+            motorcycle_handle = self.gym.create_actor(
+                env_handle, self.motorcycle_asset, pose, "motorcycle", i, 0, 0
+            )
+
+            # print(self.gym.get_actor_rigid_body_names(env_handle, motorcycle_handle))
+            num_motorcycle_bodies = self.gym.get_actor_rigid_body_count(env_handle, motorcycle_handle)
+
+            for b in range(num_motorcycle_bodies):
+                self.gym.set_rigid_body_texture(
+                    env_handle,
+                    motorcycle_handle,
+                    b,
+                    gymapi.MESH_VISUAL,
+                    motorcycle_texture
+                )
+
+            # XXXXXXXXXXXXXXXXXXXXXXXXXX
+            # FIRE HYDRANT
+            # XXXXXXXXXXXXXXXXXXXXXXXXXX
+
+            fire_hydrant_texture = self.gym.create_texture_from_file(
+                self.sim,
+                "/home/anubhav1772/Documents/lab/wtw-aliengo/resources/objects/fire_hydrant/textures/Red_Paint_Top_albedo.jpg"
+            )
+
+            # fx, fy = get_next_valid()
+            fz = env_origin[2].item()
+
+            pose = gymapi.Transform()
+            pose.p = gymapi.Vec3(fx, fy, fz + 0.3)
+            # pose.p = gymapi.Vec3(fx, fy, origin_z + 0.02)
+            # pose.r = self.upright_quat_facing_robot(fx, fy, origin_x, origin_y)
+            pose.r = gymapi.Quat.from_euler_zyx(1.57, 0, 0)
+
+            fire_hydrant_handle = self.gym.create_actor(
+                env_handle, self.firehydrant_asset, pose, "fire_hydrant", i, 0, 0
+            )
+
+            # print(self.gym.get_actor_rigid_body_names(env_handle, fire_hydrant_handle))
+            num_fire_hydrant_bodies = self.gym.get_actor_rigid_body_count(env_handle, fire_hydrant_handle)
+
+            for b in range(num_fire_hydrant_bodies):
+                self.gym.set_rigid_body_texture(
+                    env_handle,
+                    fire_hydrant_handle,
+                    b,
+                    gymapi.MESH_VISUAL,
+                    fire_hydrant_texture
+                )
+
             # STORE GT POSITIONS
             if not hasattr(self, "object_positions"):
                 self.object_positions = {}
@@ -2273,6 +2556,11 @@ class LeggedRobot(BaseTask):
                 "mug": (mx, my),
                 "chair": (cx, cy),
                 "bag": (bx, by),
+                "person": (px, py),
+                "couch": (cox, coy),
+                "bicycle": (bcx, bcy),
+                "motorcycle": (mcx, mcy),
+                "fire_hydrant": (fx, fy),
             }
 
             # env_origin = self.env_origins[i]
