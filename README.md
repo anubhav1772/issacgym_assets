@@ -10,6 +10,62 @@ This guide explains how to:
 - Spawn them safely in the environment
 - Attach and use cameras for perception
 
+## Available Assets
+
+Below is a list of currently available assets along with their locations in the repository.
+
+### Furniture
+
+- **Office Chair**  
+  `resources/objects/office_chair/`
+
+- **Couch**  
+  `resources/objects/couch/`
+
+### Everyday Objects
+
+- **Mug**  
+  `resources/objects/mug/`
+
+- **Backpack**  
+  `resources/objects/bagpack/`
+
+- **Shoes**  
+  `resources/objects/shoes/`
+
+- **Fire Hydrant**  
+  `resources/objects/fire_hydrant/`
+
+### Vehicles
+
+- **Bicycle**  
+  `resources/objects/bicycle/`
+
+- **Motorcycle**  
+  `resources/objects/motorcycle/`
+
+### Miscellaneous
+
+- **Guitar**  
+  `resources/objects/guitar_new/`
+
+- **Person (Human Model)**  
+  `resources/objects/person/`
+
+## 📌 Notes
+
+- Each asset directory typically contains:
+  - `.urdf` file (used by Isaac Gym)
+  - `.obj` mesh
+  - `.mtl` material file
+  - `textures/` folder
+
+- All assets are **simulation-ready** and tested with Isaac Gym.
+
+- Naming conventions follow:
+  ```bash
+  resources/objects/<asset_name>/
+
 ## Adding Custom Assets
 
 ### 1. Download 3D Models
@@ -36,9 +92,7 @@ resources/objects/office_chair/
 
 ⚠️ Important Notes:
 
-
 .mtl file is mandatory → links textures to mesh
-
 
 ### 4. Convert .obj → .urdf
 Use the [obj2urdf converter](https://github.com/alaflaquiere/obj2urdf) to generate URDF files from OBJ meshes.
@@ -105,4 +159,5 @@ To avoid floating or colliding objects, use terrain-aware sampling:
 ```bash
 def sample_terrain_aware_position(self, tile, origin_x, origin_y, existing_positions, radius):
 ```
+
 
