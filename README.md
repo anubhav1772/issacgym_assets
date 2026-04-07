@@ -2,6 +2,14 @@
 
 A curated collection of simulation-ready assets (URDFs, meshes, and textures) for NVIDIA Isaac Gym, designed for robotics research, reinforcement learning, and sim-to-real experiments.
 
+<table width="100%">
+  <tr>
+    <td align="center">
+      <img src="media/assets_isaacgym.png" style="width:100%; max-width:100%;"/>
+    </td>
+  </tr>
+</table>
+
 ## Isaac Gym: Assets & Camera Setup Guide
 
 This guide explains how to:
